@@ -996,14 +996,6 @@ func (kl *Kubelet) validateNodeIP() error {
 		return nil
 	}
 
-	// Honor IP limitations set in setNodeStatus()
-	if kl.nodeIP.IsLoopback() {
-		return fmt.Errorf("nodeIP can't be loopback address")
-	}
-	if kl.nodeIP.To4() == nil {
-		return fmt.Errorf("nodeIP must be IPv4 address")
-	}
-
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
 		return err
