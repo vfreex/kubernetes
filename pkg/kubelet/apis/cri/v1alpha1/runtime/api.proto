@@ -890,6 +890,8 @@ message PortForwardRequest {
     string pod_sandbox_id = 1;
     // Port to forward.
     repeated int32 port = 2;
+    // Whether to do reverse port forwarding
+    bool reverse = 3;
 }
 
 message PortForwardResponse {

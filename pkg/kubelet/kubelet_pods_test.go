@@ -2229,7 +2229,7 @@ func TestPortForward(t *testing.T) {
 			assert.Error(t, err, description)
 			assert.Nil(t, redirect, description)
 
-			err = kubelet.PortForward(podFullName, podUID, port, stream)
+			err = kubelet.PortForward(podFullName, podUID, port, false, stream)
 			assert.Error(t, err, description)
 		}
 		{ // Direct streaming case
@@ -2241,7 +2241,7 @@ func TestPortForward(t *testing.T) {
 			assert.NoError(t, err, description)
 			assert.Nil(t, redirect, description)
 
-			err = kubelet.PortForward(podFullName, podUID, port, stream)
+			err = kubelet.PortForward(podFullName, podUID, port, false, stream)
 			if tc.expectError {
 				assert.Error(t, err, description)
 			} else {
@@ -2264,7 +2264,7 @@ func TestPortForward(t *testing.T) {
 				assert.Equal(t, containertest.FakeHost, redirect.Host, description+": redirect")
 			}
 
-			err = kubelet.PortForward(podFullName, podUID, port, stream)
+			err = kubelet.PortForward(podFullName, podUID, port, false, stream)
 			assert.Error(t, err, description)
 		}
 	}

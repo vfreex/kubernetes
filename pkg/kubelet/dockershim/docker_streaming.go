@@ -67,11 +67,11 @@ func (r *streamingRuntime) Attach(containerID string, in io.Reader, out, errw io
 	return attachContainer(r.client, containerID, in, out, errw, tty, resize)
 }
 
-func (r *streamingRuntime) PortForward(podSandboxID string, port int32, stream io.ReadWriteCloser) error {
+func (r *streamingRuntime) PortForward(podSandboxID string, port int32, reverseForwarding bool, stream io.ReadWriteCloser) error {
 	if port < 0 || port > math.MaxUint16 {
 		return fmt.Errorf("invalid port %d", port)
 	}
-	return portForward(r.client, podSandboxID, port, stream)
+	return portForward(r.client, podSandboxID, port, reverseForwarding, stream)
 }
 
 // ExecSync executes a command in the container, and returns the stdout output.
@@ -159,7 +159,7 @@ func attachContainer(client libdocker.Interface, containerID string, stdin io.Re
 	return client.AttachToContainer(containerID, opts, sopts)
 }
 
-func portForward(client libdocker.Interface, podSandboxID string, port int32, stream io.ReadWriteCloser) error {
+func portForward(client libdocker.Interface, podSandboxID string, port int32, reverseForwarding bool, stream io.ReadWriteCloser) error {
 	container, err := client.InspectContainer(podSandboxID)
 	if err != nil {
 		return err
@@ -175,7 +175,12 @@ func portForward(client libdocker.Interface, podSandboxID string, port int32, st
 		return fmt.Errorf("unable to do port forwarding: socat not found.")
 	}
 
-	args := []string{"-t", fmt.Sprintf("%d", containerPid), "-n", socatPath, "-", fmt.Sprintf("TCP4:localhost:%d", port)}
+	var args []string
+	if reverseForwarding {
+		args = []string{"-t", fmt.Sprintf("%d", containerPid), "-n", socatPath, fmt.Sprintf("TCP4-LISTEN:%d,reuseaddr,fork", port), "STDOUT"}
+	} else {
+		args = []string{"-t", fmt.Sprintf("%d", containerPid), "-n", socatPath, "-", fmt.Sprintf("TCP4:localhost:%d", port)}
+	}
 
 	nsenterPath, lookupErr := exec.LookPath("nsenter")
 	if lookupErr != nil {
@@ -205,6 +210,7 @@ func portForward(client libdocker.Interface, podSandboxID string, port int32, st
 		return fmt.Errorf("unable to do port forwarding: error creating stdin pipe: %v", err)
 	}
 	go func() {
+		io.Copy(inPipe, bytes.NewReader([]byte("test writing to socat")))
 		io.Copy(inPipe, stream)
 		inPipe.Close()
 	}()

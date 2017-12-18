@@ -41,6 +41,7 @@ import (
 type PortForwardOptions struct {
 	Namespace     string
 	PodName       string
+	Reverse       bool
 	RESTClient    *restclient.RESTClient
 	Config        *restclient.Config
 	PodClient     coreclient.PodsGetter
@@ -59,7 +60,16 @@ var (
 		kubectl port-forward mypod 8888:5000
 
 		# Listen on a random port locally, forwarding to 5000 in the pod
-		kubectl port-forward mypod :5000`))
+		kubectl port-forward mypod :5000
+
+		# Listen on ports 5000 and 6000 in the pod, forwarding data to/from local ports 5000 and 6000
+		kubectl port-forward --reverse mypod 5000 6000
+
+		# Listen on port 8888 in the pod, forwarding data to/from local port 5000
+		kubectl port-forward --reverse mypod 8888:5000
+
+		# Listen on a random port in the pod, forwarding to local port 5000
+		kubectl port-forward --reverse mypod :5000`))
 )
 
 func NewCmdPortForward(f cmdutil.Factory, cmdOut, cmdErr io.Writer) *cobra.Command {
@@ -72,7 +82,7 @@ func NewCmdPortForward(f cmdutil.Factory, cmdOut, cmdErr io.Writer) *cobra.Comma
 	cmd := &cobra.Command{
 		Use:     "port-forward POD [LOCAL_PORT:]REMOTE_PORT [...[LOCAL_PORT_N:]REMOTE_PORT_N]",
 		Short:   i18n.T("Forward one or more local ports to a pod"),
-		Long:    "Forward one or more local ports to a pod.",
+		Long:    "Forward one or more local ports to/from a pod.",
 		Example: portforwardExample,
 		Run: func(cmd *cobra.Command, args []string) {
 			if err := opts.Complete(f, cmd, args); err != nil {
@@ -87,6 +97,7 @@ func NewCmdPortForward(f cmdutil.Factory, cmdOut, cmdErr io.Writer) *cobra.Comma
 		},
 	}
 	cmd.Flags().StringP("pod", "p", "", "Pod name")
+	cmd.Flags().BoolVarP(&opts.Reverse, "reverse", "r", false, "Whether to do reverse port forwarding")
 	// TODO support UID
 	return cmd
 }
@@ -105,7 +116,7 @@ func (f *defaultPortForwarder) ForwardPorts(method string, url *url.URL, opts Po
 		return err
 	}
 	dialer := spdy.NewDialer(upgrader, &http.Client{Transport: transport}, method, url)
-	fw, err := portforward.New(dialer, opts.Ports, opts.StopChannel, opts.ReadyChannel, f.cmdOut, f.cmdErr)
+	fw, err := portforward.New(dialer, opts.Ports, opts.Reverse, opts.StopChannel, opts.ReadyChannel, f.cmdOut, f.cmdErr)
 	if err != nil {
 		return err
 	}
@@ -196,6 +207,5 @@ func (o PortForwardOptions) RunPortForward() error {
 		Namespace(o.Namespace).
 		Name(pod.Name).
 		SubResource("portforward")
-
 	return o.PortForwarder.ForwardPorts("POST", req.URL(), o)
 }

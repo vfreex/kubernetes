@@ -4438,6 +4438,8 @@ const (
 	// Name of header that specifies a request ID used to associate the error
 	// and data streams for a single forwarded connection
 	PortForwardRequestIDHeader = "requestID"
+	// Name of header that specifies if reverse port forwarding is enabled
+	PortForwardReverseForwardingHeader = "reverse"
 )
 
 // Type and constants for component health validation.
