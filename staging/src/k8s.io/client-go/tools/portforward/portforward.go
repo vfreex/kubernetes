@@ -30,6 +30,7 @@ import (
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/httpstream"
 	"k8s.io/apimachinery/pkg/util/runtime"
+	"bufio"
 )
 
 // TODO move to API machinery and re-unify with kubelet/server/portfoward
@@ -40,6 +41,7 @@ const PortForwardProtocolV1Name = "portforward.k8s.io"
 // a remote pod via an upgraded HTTP request.
 type PortForwarder struct {
 	ports    []ForwardedPort
+	remote   bool
 	stopChan <-chan struct{}
 
 	dialer        httpstream.Dialer
@@ -111,7 +113,7 @@ func parsePorts(ports []string) ([]ForwardedPort, error) {
 }
 
 // New creates a new PortForwarder.
-func New(dialer httpstream.Dialer, ports []string, stopChan <-chan struct{}, readyChan chan struct{}, out, errOut io.Writer) (*PortForwarder, error) {
+func New(dialer httpstream.Dialer, ports []string, remotePortForwarding bool, stopChan <-chan struct{}, readyChan chan struct{}, out, errOut io.Writer) (*PortForwarder, error) {
 	if len(ports) == 0 {
 		return nil, errors.New("You must specify at least 1 port")
 	}
@@ -122,6 +124,7 @@ func New(dialer httpstream.Dialer, ports []string, stopChan <-chan struct{}, rea
 	return &PortForwarder{
 		dialer:   dialer,
 		ports:    parsedPorts,
+		remote:   remotePortForwarding,
 		stopChan: stopChan,
 		Ready:    readyChan,
 		out:      out,
@@ -140,14 +143,17 @@ func (pf *PortForwarder) ForwardPorts() error {
 		return fmt.Errorf("error upgrading connection: %s", err)
 	}
 	defer pf.streamConn.Close()
-
-	return pf.forward()
+	if !pf.remote {
+		return pf.localForward()
+	} else {
+		return pf.remoteForward()
+	}
 }
 
-// forward dials the remote host specific in req, upgrades the request, starts
+// localForward dials the remote host specific in req, upgrades the request, starts
 // listeners for each port specified in ports, and forwards local connections
 // to the remote host via streams.
-func (pf *PortForwarder) forward() error {
+func (pf *PortForwarder) localForward() error {
 	var err error
 
 	listenSuccess := false
@@ -181,6 +187,94 @@ func (pf *PortForwarder) forward() error {
 	return nil
 }
 
+// remoteForward dials the remote host specific in req, upgrades the request, starts
+// remote listeners for each port specified in ports, and forwards remote connections
+// to the local host via streams.
+func (pf *PortForwarder) remoteForward() error {
+	pf.handleRemotePortForwardingCommands()
+	return fmt.Errorf("Not implemented.")
+}
+
+// handleRemotePortForwardingCommands creates a pair of streams, aka command streams, for transmitting commands between kubelet and kubectl.
+// The error stream will be used to receive error messages from kubelet.
+// When a new incoming connection is received from a remote Pod port, kubelet will send a notification via the data stream
+// so that kubectl can establish new a connection to the corresponding local port.
+// Closing the data stream to notify kubelet to stop the listener in the remote Pod.
+func (pf *PortForwarder) handleRemotePortForwardingCommands(port *ForwardedPort) {
+	requestID := pf.nextRequestID()
+
+	// create error stream
+	headers := http.Header{}
+	headers.Set(v1.StreamType, v1.StreamTypeError)
+	headers.Set(v1.PortHeader, "0")
+	headers.Set(v1.PortForwardRequestIDHeader, strconv.Itoa(requestID))
+	errorStream, err := pf.streamConn.CreateStream(headers)
+	if err != nil {
+		runtime.HandleError(fmt.Errorf("error creating command error stream for remote port %d -> %d: %v", port.Remote, port.Local, err))
+		return
+	}
+	// we're not writing to this stream
+	errorStream.Close()
+
+	errorChan := make(chan error)
+	go func() {
+		message, err := ioutil.ReadAll(errorStream)
+		switch {
+		case err != nil:
+			errorChan <- fmt.Errorf("error reading from error stream for remote port %d -> %d: %v", port.Remote, port.Local, err)
+		case len(message) > 0:
+			errorChan <- fmt.Errorf("an error occurred forwarding remote port %d -> %d: %v", port.Remote, port.Local, string(message))
+		}
+		close(errorChan)
+	}()
+
+	// create data stream
+	headers.Set(v1.StreamType, v1.StreamTypeData)
+	dataStream, err := pf.streamConn.CreateStream(headers)
+	if err != nil {
+		runtime.HandleError(fmt.Errorf("error creating forwarding stream for port %d -> %d: %v", port.Local, port.Remote, err))
+		return
+	}
+
+	localError := make(chan struct{})
+	remoteDone := make(chan struct{})
+
+	go func() {
+		// FIXME: the parsing and serving procedure should go to a separated package or object
+		scanner := bufio.NewScanner(dataStream)
+		// receive commands sent by kubelet
+		for scanner.Scan() {
+			line := scanner.Text()
+			switch line {
+			case "CONNECT":
+				// create a new connection to local port
+				err := pf.connectToPortAndAddress(port, "tcp6", "[::1]")
+				if err != nil {
+					pf.connectToPortAndAddress(port, "tcp4", "127.0.0.1")
+				}
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			runtime.HandleError(fmt.Errorf("error reading from command data stream for remote port %d -> %d: %v", port.Local, port.Remote, err))
+			return
+		}
+		// inform the select below that the remote copy is done
+		close(remoteDone)
+	}()
+
+	// wait for either a local->remote error or for copying from remote->local to finish
+	select {
+	case <-remoteDone:
+	case <-localError:
+	}
+
+	// always expect something on errorChan (it may be nil)
+	err = <-errorChan
+	if err != nil {
+		runtime.HandleError(err)
+	}
+}
+
 // listenOnPort delegates tcp4 and tcp6 listener creation and waits for connections on both of these addresses.
 // If both listener creation fail, an error is raised.
 func (pf *PortForwarder) listenOnPort(port *ForwardedPort) error {
@@ -189,6 +283,28 @@ func (pf *PortForwarder) listenOnPort(port *ForwardedPort) error {
 	if errTcp4 != nil && errTcp6 != nil {
 		return fmt.Errorf("All listeners failed to create with the following errors: %s, %s", errTcp4, errTcp6)
 	}
+	return nil
+}
+
+// connectToPort creates tcp4 and tcp6 connections to localhost
+// If both connection creation fail, an error is raised.
+//func (pf *PortForwarder) connectToPort(port *ForwardedPort) error {
+//	errTcp4 := pf.connectToPortAndAddress(port, "tcp4", "127.0.0.1")
+//	errTcp6 := pf.connectToPortAndAddress(port, "tcp6", "[::1]")
+//	if errTcp4 != nil && errTcp6 != nil {
+//		return fmt.Errorf("All local connections failed to create with the following errors: %s, %s", errTcp4, errTcp6)
+//	}
+//	return nil
+//}
+
+// connectToPortAndAddress delegates local connection creation and waits for remote stream
+// in the background f
+func (pf *PortForwarder) connectToPortAndAddress(port *ForwardedPort, protocol string, address string) error {
+	conn, err := net.Dial(protocol, fmt.Sprintf("%s:%d", address, port.Local))
+	if err != nil {
+		return err
+	}
+	go pf.handleConnection(conn, *port)
 	return nil
 }
 
