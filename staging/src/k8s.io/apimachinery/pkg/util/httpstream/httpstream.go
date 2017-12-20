@@ -55,7 +55,7 @@ type Dialer interface {
 type UpgradeRoundTripper interface {
 	http.RoundTripper
 	// NewConnection validates the response and creates a new Connection.
-	NewConnection(resp *http.Response) (Connection, error)
+	NewConnection(resp *http.Response, newStreamHandler NewStreamHandler) (Connection, error)
 }
 
 // ResponseUpgrader knows how to upgrade HTTP requests and responses to

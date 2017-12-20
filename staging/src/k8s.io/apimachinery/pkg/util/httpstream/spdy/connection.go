@@ -37,14 +37,14 @@ type connection struct {
 }
 
 // NewClientConnection creates a new SPDY client connection.
-func NewClientConnection(conn net.Conn) (httpstream.Connection, error) {
+func NewClientConnection(conn net.Conn, newStreamHandler httpstream.NewStreamHandler) (httpstream.Connection, error) {
 	spdyConn, err := spdystream.NewConnection(conn, false)
 	if err != nil {
 		defer conn.Close()
 		return nil, err
 	}
 
-	return newConnection(spdyConn, httpstream.NoOpNewStreamHandler), nil
+	return newConnection(spdyConn, newStreamHandler), nil
 }
 
 // NewServerConnection creates a new SPDY server connection. newStreamHandler
@@ -64,6 +64,9 @@ func NewServerConnection(conn net.Conn, newStreamHandler httpstream.NewStreamHan
 // will be invoked when the server receives a newly created stream from the
 // client.
 func newConnection(conn *spdystream.Connection, newStreamHandler httpstream.NewStreamHandler) httpstream.Connection {
+	if newStreamHandler == nil {
+		newStreamHandler = httpstream.NoOpNewStreamHandler
+	}
 	c := &connection{conn: conn, newStreamHandler: newStreamHandler}
 	go conn.Serve(c.newSpdyStream)
 	return c

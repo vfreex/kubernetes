@@ -32,6 +32,7 @@ import (
 	"github.com/elazarl/goproxy"
 
 	"k8s.io/apimachinery/pkg/util/httpstream"
+	"github.com/docker/spdystream"
 )
 
 // be sure to unset environment variable https_proxy (if exported) before testing, otherwise the testing will fail unexpectedly.
@@ -319,7 +320,7 @@ func TestRoundTripAndNewConnection(t *testing.T) {
 				resp, err := client.Do(req)
 				var conn httpstream.Connection
 				if err == nil {
-					conn, err = spdyTransport.NewConnection(resp)
+					conn, err = spdyTransport.NewConnection(resp, nil)
 				}
 				haveErr := err != nil
 				if e, a := testCase.shouldError, haveErr; e != a {

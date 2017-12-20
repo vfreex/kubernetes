@@ -351,7 +351,7 @@ func TestDial(t *testing.T) {
 			Body:       ioutil.NopCloser(&bytes.Buffer{}),
 		},
 	}
-	dialer := spdy.NewDialer(upgrader, &http.Client{Transport: upgrader}, "POST", &url.URL{Host: "something.com", Scheme: "https"})
+	dialer := spdy.NewDialer(upgrader, &http.Client{Transport: upgrader}, "POST", &url.URL{Host: "something.com", Scheme: "https"}, nil)
 	conn, protocol, err := dialer.Dial("protocol1")
 	if err != nil {
 		t.Fatal(err)
