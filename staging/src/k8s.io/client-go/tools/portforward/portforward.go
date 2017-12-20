@@ -30,6 +30,8 @@ import (
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/httpstream"
 	"k8s.io/apimachinery/pkg/util/runtime"
+	"bufio"
+	"github.com/golang/glog"
 )
 
 // TODO move to API machinery and re-unify with kubelet/server/portfoward
@@ -40,10 +42,12 @@ const PortForwardProtocolV1Name = "portforward.k8s.io"
 // a remote pod via an upgraded HTTP request.
 type PortForwarder struct {
 	ports    []ForwardedPort
+	remote   bool
 	stopChan <-chan struct{}
 
 	dialer        httpstream.Dialer
 	streamConn    httpstream.Connection
+	newStreamChan <-chan httpstream.Stream
 	listeners     []io.Closer
 	Ready         chan struct{}
 	requestIDLock sync.Mutex
@@ -111,7 +115,7 @@ func parsePorts(ports []string) ([]ForwardedPort, error) {
 }
 
 // New creates a new PortForwarder.
-func New(dialer httpstream.Dialer, ports []string, stopChan <-chan struct{}, readyChan chan struct{}, out, errOut io.Writer) (*PortForwarder, error) {
+func New(dialer httpstream.Dialer, newStreamChan <-chan httpstream.Stream, ports []string, remote bool, stopChan <-chan struct{}, readyChan chan struct{}, out, errOut io.Writer) (*PortForwarder, error) {
 	if len(ports) == 0 {
 		return nil, errors.New("You must specify at least 1 port")
 	}
@@ -121,7 +125,9 @@ func New(dialer httpstream.Dialer, ports []string, stopChan <-chan struct{}, rea
 	}
 	return &PortForwarder{
 		dialer:   dialer,
+		newStreamChan: newStreamChan,
 		ports:    parsedPorts,
+		remote:   remote,
 		stopChan: stopChan,
 		Ready:    readyChan,
 		out:      out,
@@ -140,7 +146,11 @@ func (pf *PortForwarder) ForwardPorts() error {
 		return fmt.Errorf("error upgrading connection: %s", err)
 	}
 	defer pf.streamConn.Close()
-
+	if !pf.remote {
+		return pf.forward()
+	} else {
+		return pf.remoteForward()
+	}
 	return pf.forward()
 }
 
@@ -181,15 +191,138 @@ func (pf *PortForwarder) forward() error {
 	return nil
 }
 
+// remoteForward dials the remote host specific in req, upgrades the request, starts
+// remote listeners for each port specified in ports, and forwards remote connections
+// to the local host via streams.
+func (pf *PortForwarder) remoteForward() error {
+	var err error
+	remoteListenSuccess := false
+	for _, port := range pf.ports {
+		err = pf.listenOnRemotePort(&port)
+		switch {
+		case err == nil:
+			remoteListenSuccess = true
+		default:
+			if pf.errOut != nil {
+				fmt.Fprintf(pf.errOut, "Unable to listen on port %d in the pod: %v\n", port.Remote, err)
+			}
+		}
+	}
+	if !remoteListenSuccess {
+		return fmt.Errorf("Unable to listen on any of the requested Pod ports")
+	}
+
+	pf.waitForRemoteConnections()
+
+	// wait for interrupt or conn closure
+	select {
+	case <-pf.stopChan:
+	case <-pf.streamConn.CloseChan():
+		runtime.HandleError(errors.New("lost connection to pod"))
+	}
+	return nil
+}
+
 // listenOnPort delegates tcp4 and tcp6 listener creation and waits for connections on both of these addresses.
 // If both listener creation fail, an error is raised.
 func (pf *PortForwarder) listenOnPort(port *ForwardedPort) error {
 	errTcp4 := pf.listenOnPortAndAddress(port, "tcp4", "127.0.0.1")
-	errTcp6 := pf.listenOnPortAndAddress(port, "tcp6", "[::1]")
+	errTcp6 := pf.listenOnPortAndAddress(port, "tcp6", "::1")
+	if errTcp6 != nil {
+		return fmt.Errorf("TCP6 listen failed %s", errTcp6)
+	}
 	if errTcp4 != nil && errTcp6 != nil {
 		return fmt.Errorf("All listeners failed to create with the following errors: %s, %s", errTcp4, errTcp6)
 	}
 	return nil
+}
+
+// remoteListenOnPort asks the remote server to listen on specified port in the pod.
+// A pair of streams, aka listener stream pair, will be created for communication between kubectl and the remote listener.
+// The error listener stream is used to get error message from the remote server if the remote listeners fail to start, like what local port forwarding does.
+// The data stream is used to transfer the actual remote hostname and port if the remote listeners start.
+// If the data stream closes, the remote server should stop the listeners in the pod.
+func (pf *PortForwarder) listenOnRemotePort(port *ForwardedPort) error {
+	requestID := pf.nextRequestID()
+
+	// create error stream
+	headers := http.Header{}
+	headers.Set(v1.StreamType, v1.StreamTypeError)
+	headers.Set(v1.PortForwardRemoteHeader, "1")
+	headers.Set(v1.PortHeader, strconv.Itoa(int(port.Remote)))
+	headers.Set(v1.PortForwardRequestIDHeader, strconv.Itoa(requestID))
+	errorStream, err := pf.streamConn.CreateStream(headers)
+	if err != nil {
+		runtime.HandleError(fmt.Errorf("error creating listener error stream for remote port forwarding %d -> %d: %v", port.Remote, port.Local, err))
+		return err
+	}
+	// we're not writing to this stream
+	errorStream.Close()
+
+	errorChan := make(chan error)
+	go func() {
+		message, err := ioutil.ReadAll(errorStream)
+		switch {
+		case err != nil:
+			errorChan <- fmt.Errorf("error reading from listener error stream for remote port forwarding %d -> %d: %v", port.Remote, port.Local, err)
+		case len(message) > 0:
+			errorChan <- fmt.Errorf("an error occurred forwarding remote port %d -> %d: %v", port.Remote, port.Local, string(message))
+		}
+		close(errorChan)
+	}()
+
+	// create data stream
+	headers.Set(v1.StreamType, v1.StreamTypeData)
+	dataStream, err := pf.streamConn.CreateStream(headers)
+	if err != nil {
+		return fmt.Errorf("error creating remote forwarding stream for port %d -> %d: %v", port.Remote, port.Local, err)
+	}
+	defer dataStream.Close()
+
+	// indicates at least one listener has been started in the pod
+	remoteLisenerStarted := make(chan struct{})
+
+	remoteDone := make(chan struct{})
+
+	go func() {
+		scanner := bufio.NewScanner(dataStream)
+		// receive incoming commands sent by kubelet
+		for scanner.Scan() {
+			line := scanner.Text()
+			var hostname string
+			var remotePort uint16
+			if n, err := fmt.Scanf("%s %d", &hostname, &remotePort); n != 2 || err != nil {
+				runtime.HandleError(fmt.Errorf("error parsing the response %s from server: %s", line, err))
+				if pf.out != nil {
+					fmt.Fprintf(pf.out, "%s\n", line)
+				}
+				continue
+			}
+			port.Remote = remotePort
+			if pf.out != nil {
+				fmt.Fprintf(pf.out, "Remote forwarding from %s -> %d\n", net.JoinHostPort(hostname, strconv.Itoa(int(port.Remote))), port.Local)
+			}
+			close(remoteLisenerStarted)
+		}
+		if err := scanner.Err(); err != nil {
+			runtime.HandleError(fmt.Errorf("error reading from command data stream for remote port %d -> %d: %v", port.Remote, port.Local, err))
+		}
+		//inform the select below that the remote listeners are done
+		close(remoteDone)
+	}()
+
+	// wait for either at least one listener to start or for all listeners to finish
+	select {
+	case <-remoteLisenerStarted:
+	case <-remoteDone:
+	}
+
+	// always expect something on errorChan (it may be nil)
+	err = <-errorChan
+	if err != nil {
+		runtime.HandleError(err)
+	}
+	return err
 }
 
 // listenOnPortAndAddress delegates listener creation and waits for new connections
@@ -240,6 +373,30 @@ func (pf *PortForwarder) waitForConnection(listener net.Listener, port Forwarded
 		}
 		go pf.handleConnection(conn, port)
 	}
+}
+
+// waitForRemoteConnections waits for new connections from the Pod and handles them in
+// the background.
+func (pf *PortForwarder) waitForRemoteConnections() error {
+	select {
+	case stream, ok := <- pf.newStreamChan:
+		defer stream.Close()
+		if !ok {
+			break
+		}
+		pf.handleRemoteConnection(stream)
+	}
+	return nil
+}
+
+func (pf *PortForwarder) handleRemoteConnection(stream httpstream.Stream) error {
+	// make sure it has a valid port header
+	portString := stream.Headers().Get(v1.PortHeader)
+	if len(portString) == 0 {
+		return fmt.Errorf("%q header is required", v1.PortHeader)
+	}
+	glog.Info("Incoming connection from pod port %d.", )
+	return nil
 }
 
 func (pf *PortForwarder) nextRequestID() int {

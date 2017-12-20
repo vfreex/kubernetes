@@ -35,6 +35,7 @@ import (
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/pkg/kubectl/util/i18n"
+	"k8s.io/apimachinery/pkg/util/httpstream"
 )
 
 // PortForwardOptions contains all the options for running the port-forward cli command.
@@ -45,12 +46,21 @@ type PortForwardOptions struct {
 	Config        *restclient.Config
 	PodClient     coreclient.PodsGetter
 	Ports         []string
+	Remote        bool
 	PortForwarder portForwarder
 	StopChannel   chan struct{}
 	ReadyChannel  chan struct{}
 }
 
 var (
+	portforwardLong = templates.LongDesc(i18n.T(`
+		Forward one or more local ports to a pod, or vice versa.
+
+		Local port forwarding is used to forward a port from the local machine to a port in the pod.
+		Remote port forwarding listens on a port in the pod and forwards the connection back to a local port.
+
+		Do remote port forwarding by providing the --remote flag, otherwise local port forwarding will be performed.`))
+
 	portforwardExample = templates.Examples(i18n.T(`
 		# Listen on ports 5000 and 6000 locally, forwarding data to/from ports 5000 and 6000 in the pod
 		kubectl port-forward mypod 5000 6000
@@ -59,7 +69,16 @@ var (
 		kubectl port-forward mypod 8888:5000
 
 		# Listen on a random port locally, forwarding to 5000 in the pod
-		kubectl port-forward mypod :5000`))
+		kubectl port-forward mypod :5000
+
+		# Listen on ports 5000 and 6000 in the pod, forwarding data to/from local ports 5000 and 6000
+		kubectl port-forward --reverse mypod 5000 6000
+
+		# Listen on port 8888 in the pod, forwarding data to/from local port 5000
+		kubectl port-forward --reverse mypod 8888:5000
+
+		# Listen on a random port in the pod, forwarding to local port 5000
+		kubectl port-forward --reverse mypod :5000`))
 )
 
 func NewCmdPortForward(f cmdutil.Factory, cmdOut, cmdErr io.Writer) *cobra.Command {
@@ -71,8 +90,8 @@ func NewCmdPortForward(f cmdutil.Factory, cmdOut, cmdErr io.Writer) *cobra.Comma
 	}
 	cmd := &cobra.Command{
 		Use:     "port-forward POD [LOCAL_PORT:]REMOTE_PORT [...[LOCAL_PORT_N:]REMOTE_PORT_N]",
-		Short:   i18n.T("Forward one or more local ports to a pod"),
-		Long:    "Forward one or more local ports to a pod.",
+		Short:   i18n.T("Forward one or more local ports to a pod, or vice versa"),
+		Long:    portforwardLong,
 		Example: portforwardExample,
 		Run: func(cmd *cobra.Command, args []string) {
 			if err := opts.Complete(f, cmd, args); err != nil {
@@ -87,6 +106,7 @@ func NewCmdPortForward(f cmdutil.Factory, cmdOut, cmdErr io.Writer) *cobra.Comma
 		},
 	}
 	cmd.Flags().StringP("pod", "p", "", "Pod name")
+	cmd.Flags().BoolVarP(&opts.Remote, "remote", "r", false, "Whether to do remote port forwarding")
 	// TODO support UID
 	return cmd
 }
@@ -99,13 +119,25 @@ type defaultPortForwarder struct {
 	cmdOut, cmdErr io.Writer
 }
 
+// streamReceived is the httpstream.NewStreamHandler for port
+// forward streams.
+func streamReceived(streams chan httpstream.Stream) func(httpstream.Stream, <-chan struct{}) error {
+	return func(stream httpstream.Stream, replySent <-chan struct{}) error {
+		streams <- stream
+		return nil
+	}
+}
+
 func (f *defaultPortForwarder) ForwardPorts(method string, url *url.URL, opts PortForwardOptions) error {
 	transport, upgrader, err := spdy.RoundTripperFor(opts.Config)
 	if err != nil {
 		return err
 	}
-	dialer := spdy.NewDialer(upgrader, &http.Client{Transport: transport}, method, url)
-	fw, err := portforward.New(dialer, opts.Ports, opts.StopChannel, opts.ReadyChannel, f.cmdOut, f.cmdErr)
+
+	newStreamChan := make(chan httpstream.Stream)
+	dialer := spdy.NewDialer(upgrader, &http.Client{Transport: transport}, method, url, streamReceived(newStreamChan))
+
+	fw, err := portforward.New(dialer, newStreamChan, opts.Ports, opts.Remote, opts.StopChannel, opts.ReadyChannel, f.cmdOut, f.cmdErr)
 	if err != nil {
 		return err
 	}
