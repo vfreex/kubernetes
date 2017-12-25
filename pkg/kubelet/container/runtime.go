@@ -31,6 +31,7 @@ import (
 	"k8s.io/client-go/util/flowcontrol"
 	runtimeapi "k8s.io/kubernetes/pkg/kubelet/apis/cri/v1alpha1/runtime"
 	"k8s.io/kubernetes/pkg/volume"
+	"k8s.io/apimachinery/pkg/util/httpstream"
 )
 
 type Version interface {
@@ -131,7 +132,7 @@ type DirectStreamingRuntime interface {
 	// the processes stdin, stdout, and stderr. Optionally uses a tty.
 	ExecInContainer(containerID ContainerID, cmd []string, stdin io.Reader, stdout, stderr io.WriteCloser, tty bool, resize <-chan remotecommand.TerminalSize, timeout time.Duration) error
 	// Forward the specified port from the specified pod to the stream.
-	PortForward(pod *Pod, port int32, stream io.ReadWriteCloser) error
+	PortForward(pod *Pod, port int32, remoteForwarding bool, stream io.ReadWriteCloser, connection httpstream.Connection) error
 	// ContainerAttach encapsulates the attaching to containers for testability
 	ContainerAttacher
 }

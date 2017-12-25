@@ -30,7 +30,7 @@ import (
 	"strings"
 	"time"
 
-	restful "github.com/emicklei/go-restful"
+	"github.com/emicklei/go-restful"
 	"github.com/golang/glog"
 	cadvisorapi "github.com/google/cadvisor/info/v1"
 	"github.com/google/cadvisor/metrics"
@@ -61,6 +61,7 @@ import (
 	kubelettypes "k8s.io/kubernetes/pkg/kubelet/types"
 	"k8s.io/kubernetes/pkg/util/configz"
 	"k8s.io/kubernetes/pkg/util/limitwriter"
+	"k8s.io/apimachinery/pkg/util/httpstream"
 )
 
 const (
@@ -176,7 +177,7 @@ type HostInterface interface {
 	AttachContainer(name string, uid types.UID, container string, in io.Reader, out, err io.WriteCloser, tty bool, resize <-chan remotecommand.TerminalSize) error
 	GetKubeletContainerLogs(podFullName, containerName string, logOptions *v1.PodLogOptions, stdout, stderr io.Writer) error
 	ServeLogs(w http.ResponseWriter, req *http.Request)
-	PortForward(name string, uid types.UID, port int32, stream io.ReadWriteCloser) error
+	PortForward(name string, uid types.UID, port int32, remoteForwarding bool, stream io.ReadWriteCloser, connection httpstream.Connection) error
 	StreamingConnectionIdleTimeout() time.Duration
 	ResyncInterval() time.Duration
 	GetHostname() string

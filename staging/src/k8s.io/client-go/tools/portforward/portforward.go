@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"bufio"
 	"github.com/golang/glog"
+	"math"
 )
 
 // TODO move to API machinery and re-unify with kubelet/server/portfoward
@@ -124,14 +125,14 @@ func New(dialer httpstream.Dialer, newStreamChan <-chan httpstream.Stream, ports
 		return nil, err
 	}
 	return &PortForwarder{
-		dialer:   dialer,
+		dialer:        dialer,
 		newStreamChan: newStreamChan,
-		ports:    parsedPorts,
-		remote:   remote,
-		stopChan: stopChan,
-		Ready:    readyChan,
-		out:      out,
-		errOut:   errOut,
+		ports:         parsedPorts,
+		remote:        remote,
+		stopChan:      stopChan,
+		Ready:         readyChan,
+		out:           out,
+		errOut:        errOut,
 	}, nil
 }
 
@@ -180,14 +181,16 @@ func (pf *PortForwarder) forward() error {
 	if pf.Ready != nil {
 		close(pf.Ready)
 	}
-
+	glog.Infof("yuxzhu: doing local port forwarding...")
 	// wait for interrupt or conn closure
 	select {
 	case <-pf.stopChan:
+		glog.Infof("yuxzhu: stopChan received for local port forwarding...")
 	case <-pf.streamConn.CloseChan():
+		glog.Infof("yuxzhu: streamConn.CloseChan() received local port forwarding...")
 		runtime.HandleError(errors.New("lost connection to pod"))
 	}
-
+	glog.Infof("yuxzhu: localForward stopped")
 	return nil
 }
 
@@ -196,8 +199,12 @@ func (pf *PortForwarder) forward() error {
 // to the local host via streams.
 func (pf *PortForwarder) remoteForward() error {
 	var err error
+
+	go pf.waitForRemoteConnections()
+
 	remoteListenSuccess := false
 	for _, port := range pf.ports {
+		glog.Infof("yuxzhu: will listen on remote port %d", port.Remote)
 		err = pf.listenOnRemotePort(&port)
 		switch {
 		case err == nil:
@@ -211,15 +218,17 @@ func (pf *PortForwarder) remoteForward() error {
 	if !remoteListenSuccess {
 		return fmt.Errorf("Unable to listen on any of the requested Pod ports")
 	}
-
-	pf.waitForRemoteConnections()
+	glog.Infof("yuxzhu: doing remote port forwarding...")
 
 	// wait for interrupt or conn closure
 	select {
 	case <-pf.stopChan:
+		glog.Infof("yuxzhu: stopChan received for remote port forwarding...")
 	case <-pf.streamConn.CloseChan():
+		glog.Infof("yuxzhu: streamConn.CloseChan() received remote port forwarding...")
 		runtime.HandleError(errors.New("lost connection to pod"))
 	}
+	glog.Infof("yuxzhu: remoteForward stopped")
 	return nil
 }
 
@@ -256,20 +265,8 @@ func (pf *PortForwarder) listenOnRemotePort(port *ForwardedPort) error {
 		runtime.HandleError(fmt.Errorf("error creating listener error stream for remote port forwarding %d -> %d: %v", port.Remote, port.Local, err))
 		return err
 	}
-	// we're not writing to this stream
+	// we're not writing to error control stream
 	errorStream.Close()
-
-	errorChan := make(chan error)
-	go func() {
-		message, err := ioutil.ReadAll(errorStream)
-		switch {
-		case err != nil:
-			errorChan <- fmt.Errorf("error reading from listener error stream for remote port forwarding %d -> %d: %v", port.Remote, port.Local, err)
-		case len(message) > 0:
-			errorChan <- fmt.Errorf("an error occurred forwarding remote port %d -> %d: %v", port.Remote, port.Local, string(message))
-		}
-		close(errorChan)
-	}()
 
 	// create data stream
 	headers.Set(v1.StreamType, v1.StreamTypeData)
@@ -277,52 +274,51 @@ func (pf *PortForwarder) listenOnRemotePort(port *ForwardedPort) error {
 	if err != nil {
 		return fmt.Errorf("error creating remote forwarding stream for port %d -> %d: %v", port.Remote, port.Local, err)
 	}
+	//pf.listeners = append(pf.listeners, dataStream)
+
+	go pf.handleControlStreams(port, dataStream, errorStream)
+
+	return nil
+}
+
+func (pf *PortForwarder) handleControlStreams(port *ForwardedPort, dataStream, errorStream httpstream.Stream) {
 	defer dataStream.Close()
-
-	// indicates at least one listener has been started in the pod
-	remoteLisenerStarted := make(chan struct{})
-
-	remoteDone := make(chan struct{})
-
+	errorChan := make(chan error)
 	go func() {
+		defer close(errorChan)
+		message, err := ioutil.ReadAll(errorStream)
+		switch {
+		case err != nil:
+			errorChan <- fmt.Errorf("error reading from listener error stream for remote port forwarding %d -> %d: %v", port.Remote, port.Local, err)
+		case len(message) > 0:
+			errorChan <- fmt.Errorf("an error occurred forwarding remote port %d -> %d: %v", port.Remote, port.Local, string(message))
+		}
+	}()
+
+	dataStreamDone := make(chan struct{})
+	go func() {
+		defer close(dataStreamDone)
 		scanner := bufio.NewScanner(dataStream)
 		// receive incoming commands sent by kubelet
 		for scanner.Scan() {
 			line := scanner.Text()
-			var hostname string
-			var remotePort uint16
-			if n, err := fmt.Scanf("%s %d", &hostname, &remotePort); n != 2 || err != nil {
-				runtime.HandleError(fmt.Errorf("error parsing the response %s from server: %s", line, err))
-				if pf.out != nil {
-					fmt.Fprintf(pf.out, "%s\n", line)
-				}
-				continue
-			}
-			port.Remote = remotePort
 			if pf.out != nil {
-				fmt.Fprintf(pf.out, "Remote forwarding from %s -> %d\n", net.JoinHostPort(hostname, strconv.Itoa(int(port.Remote))), port.Local)
+				fmt.Fprintf(pf.out, "Received from remote: %v", line)
 			}
-			close(remoteLisenerStarted)
 		}
 		if err := scanner.Err(); err != nil {
 			runtime.HandleError(fmt.Errorf("error reading from command data stream for remote port %d -> %d: %v", port.Remote, port.Local, err))
 		}
-		//inform the select below that the remote listeners are done
-		close(remoteDone)
 	}()
 
-	// wait for either at least one listener to start or for all listeners to finish
-	select {
-	case <-remoteLisenerStarted:
-	case <-remoteDone:
-	}
+	// wait for the data control stream to be closed or for all listeners to finish
+	<-dataStreamDone
 
 	// always expect something on errorChan (it may be nil)
-	err = <-errorChan
+	err := <-errorChan
 	if err != nil {
 		runtime.HandleError(err)
 	}
-	return err
 }
 
 // listenOnPortAndAddress delegates listener creation and waits for new connections
@@ -378,25 +374,70 @@ func (pf *PortForwarder) waitForConnection(listener net.Listener, port Forwarded
 // waitForRemoteConnections waits for new connections from the Pod and handles them in
 // the background.
 func (pf *PortForwarder) waitForRemoteConnections() error {
-	select {
-	case stream, ok := <- pf.newStreamChan:
-		defer stream.Close()
-		if !ok {
-			break
+	for {
+		glog.Info("yuxzhu: waiting from remote connections")
+		select {
+		case stream, ok := <-pf.newStreamChan:
+			glog.Info("yuxzhu: incoming remote connection")
+			if !ok {
+				break
+			}
+			glog.Info("yuxzhu: will process incoming remote connection")
+			go pf.handleRemoteConnection(stream)
 		}
-		pf.handleRemoteConnection(stream)
 	}
 	return nil
 }
 
-func (pf *PortForwarder) handleRemoteConnection(stream httpstream.Stream) error {
+func (pf *PortForwarder) handleRemoteConnection(stream httpstream.Stream) {
+	defer stream.Close()
 	// make sure it has a valid port header
 	portString := stream.Headers().Get(v1.PortHeader)
 	if len(portString) == 0 {
-		return fmt.Errorf("%q header is required", v1.PortHeader)
+		runtime.HandleError(fmt.Errorf("%q header is required", v1.PortHeader))
+		return
 	}
-	glog.Info("Incoming connection from pod port %d.", )
-	return nil
+	port, err := strconv.Atoi(portString)
+	if err != nil {
+		runtime.HandleError(fmt.Errorf("invalid local port number: %v", err))
+		return
+	}
+	if port <= 0 || port > math.MaxUint16 {
+		runtime.HandleError(fmt.Errorf("local port number is out of range: %d", port))
+		return
+	}
+	// FIXME: assuming local port == pod port
+	glog.Infof("connecting to local port %d.", port)
+	conn, err := net.Dial("tcp4", net.JoinHostPort("localhost", strconv.Itoa(port)))
+	if err != nil {
+		runtime.HandleError(fmt.Errorf("Failed to connect to local port %d", port))
+		return
+	}
+	defer conn.Close()
+	readChan := make(chan interface{})
+	writeChan := make(chan interface{})
+	go func() {
+		// Copy from the local port to the remote side.
+		if _, err := io.Copy(stream, conn); err != nil {
+			runtime.HandleError(fmt.Errorf("error copying from local connection to remote stream: %v", err))
+		}
+		glog.Infof("local -> pod %d closed", port)
+		close(writeChan)
+	}()
+	go func() {
+		// Copy from the remote side to the local port.
+		if _, err := io.Copy(conn, stream); err != nil {
+			runtime.HandleError(fmt.Errorf("error copying from remote stream to local connection: %v", err))
+		}
+		glog.Infof("pod %d->local closed", port)
+		close(readChan)
+	}()
+
+	select {
+	case <-readChan:
+	case <-writeChan:
+	}
+	glog.Infof("connection lost for pod port forwarding %d.", port)
 }
 
 func (pf *PortForwarder) nextRequestID() int {

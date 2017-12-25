@@ -23,6 +23,7 @@ go_library(
         "//vendor/google.golang.org/grpc/codes:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/types:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/util/clock:go_default_library",
+        "//vendor/k8s.io/apimachinery/pkg/util/httpstream:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/util/remotecommand:go_default_library",
         "//vendor/k8s.io/client-go/tools/remotecommand:go_default_library",
     ],

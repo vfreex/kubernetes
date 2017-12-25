@@ -36,7 +36,7 @@ import (
 )
 
 const (
-	dataChannel = iota
+	dataChannel  = iota
 	errorChannel
 
 	v4BinaryWebsocketProtocol = "v4." + wsstream.ChannelWebSocketProtocol
@@ -48,7 +48,8 @@ const (
 // All fields incldued in V4Options need to be expressed explicilty in the
 // CRI (pkg/kubelet/apis/cri/{version}/api.proto) PortForwardRequest.
 type V4Options struct {
-	Ports []int32
+	Ports   []int32
+	Reverse bool
 }
 
 // newOptions creates a new options from the Request.
@@ -79,8 +80,15 @@ func NewV4Options(req *http.Request) (*V4Options, error) {
 		}
 	}
 
+	remoteForwardingStrings := req.URL.Query()[api.PortForwardRemoteHeader]
+	remoteForwarding := false
+	if len(remoteForwardingStrings) > 0 && remoteForwardingStrings[0] == "1" {
+		remoteForwarding = true
+	}
+
 	return &V4Options{
-		Ports: ports,
+		Ports:   ports,
+		Reverse: remoteForwarding,
 	}, nil
 }
 
@@ -150,6 +158,7 @@ func handleWebSocketStreams(req *http.Request, w http.ResponseWriter, portForwar
 // forwarding request.
 type websocketStreamPair struct {
 	port        int32
+	reverse     bool
 	dataStream  io.ReadWriteCloser
 	errorStream io.WriteCloser
 }
@@ -186,7 +195,7 @@ func (h *websocketStreamHandler) portForward(p *websocketStreamPair) {
 	defer p.errorStream.Close()
 
 	glog.V(5).Infof("(conn=%p) invoking forwarder.PortForward for port %d", h.conn, p.port)
-	err := h.forwarder.PortForward(h.pod, h.uid, p.port, p.dataStream)
+	err := h.forwarder.PortForward(h.pod, h.uid, p.port, p.reverse, p.dataStream, nil)
 	glog.V(5).Infof("(conn=%p) done invoking forwarder.PortForward for port %d", h.conn, p.port)
 
 	if err != nil {

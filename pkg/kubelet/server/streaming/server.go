@@ -36,6 +36,7 @@ import (
 	runtimeapi "k8s.io/kubernetes/pkg/kubelet/apis/cri/v1alpha1/runtime"
 	"k8s.io/kubernetes/pkg/kubelet/server/portforward"
 	remotecommandserver "k8s.io/kubernetes/pkg/kubelet/server/remotecommand"
+	"k8s.io/apimachinery/pkg/util/httpstream"
 )
 
 // The library interface to serve the stream requests.
@@ -62,7 +63,7 @@ type Server interface {
 type Runtime interface {
 	Exec(containerID string, cmd []string, in io.Reader, out, err io.WriteCloser, tty bool, resize <-chan remotecommand.TerminalSize) error
 	Attach(containerID string, in io.Reader, out, err io.WriteCloser, tty bool, resize <-chan remotecommand.TerminalSize) error
-	PortForward(podSandboxID string, port int32, stream io.ReadWriteCloser) error
+	PortForward(podSandboxID string, port int32, remoteForwarding bool, stream io.ReadWriteCloser, connection httpstream.Connection) error
 }
 
 // Config defines the options used for running the stream server.
@@ -369,6 +370,6 @@ func (a *criAdapter) AttachContainer(podName string, podUID types.UID, container
 	return a.Runtime.Attach(container, in, out, err, tty, resize)
 }
 
-func (a *criAdapter) PortForward(podName string, podUID types.UID, port int32, stream io.ReadWriteCloser) error {
-	return a.Runtime.PortForward(podName, port, stream)
+func (a *criAdapter) PortForward(podName string, podUID types.UID, port int32, remoteForwarding bool, stream io.ReadWriteCloser, connection httpstream.Connection) error {
+	return a.Runtime.PortForward(podName, port, remoteForwarding, stream, connection)
 }

@@ -24,13 +24,14 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apiserver/pkg/util/wsstream"
+	"k8s.io/apimachinery/pkg/util/httpstream"
 )
 
 // PortForwarder knows how to forward content from a data stream to/from a port
 // in a pod.
 type PortForwarder interface {
 	// PortForwarder copies data between a data stream and a port in a pod.
-	PortForward(name string, uid types.UID, port int32, stream io.ReadWriteCloser) error
+	PortForward(name string, uid types.UID, port int32, remoteForwarding bool, stream io.ReadWriteCloser, connection httpstream.Connection) error
 }
 
 // ServePortForward handles a port forwarding request.  A single request is

@@ -40,6 +40,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/tools/remotecommand"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
@@ -47,6 +48,7 @@ import (
 	podshelper "k8s.io/kubernetes/pkg/apis/core/pods"
 	v1helper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
 	v1qos "k8s.io/kubernetes/pkg/apis/core/v1/helper/qos"
+	"k8s.io/kubernetes/pkg/apis/core/v1/validation"
 	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/fieldpath"
 	runtimeapi "k8s.io/kubernetes/pkg/kubelet/apis/cri/v1alpha1/runtime"
@@ -66,6 +68,7 @@ import (
 	"k8s.io/kubernetes/pkg/volume/util/volumehelper"
 	volumevalidation "k8s.io/kubernetes/pkg/volume/validation"
 	"k8s.io/kubernetes/third_party/forked/golang/expansion"
+	"k8s.io/apimachinery/pkg/util/httpstream"
 )
 
 // Get a list of pods that have data directories.
@@ -1107,6 +1110,22 @@ func (kl *Kubelet) podKiller() {
 	}
 }
 
+// hasHostPortConflicts detects pods with conflicted host ports.
+func hasHostPortConflicts(pods []*v1.Pod) bool {
+	ports := sets.String{}
+	for _, pod := range pods {
+		if errs := validation.AccumulateUniqueHostPorts(pod.Spec.Containers, &ports, field.NewPath("spec", "containers")); len(errs) > 0 {
+			glog.Errorf("Pod %q: HostPort is already allocated, ignoring: %v", format.Pod(pod), errs)
+			return true
+		}
+		if errs := validation.AccumulateUniqueHostPorts(pod.Spec.InitContainers, &ports, field.NewPath("spec", "initContainers")); len(errs) > 0 {
+			glog.Errorf("Pod %q: HostPort is already allocated, ignoring: %v", format.Pod(pod), errs)
+			return true
+		}
+	}
+	return false
+}
+
 // validateContainerLogStatus returns the container ID for the desired container to retrieve logs for, based on the state
 // of the container. The previous flag will only return the logs for the last terminated container, otherwise, the current
 // running container is preferred over a previous termination. If info about the container is not available then a specific
@@ -1622,7 +1641,7 @@ func (kl *Kubelet) AttachContainer(podFullName string, podUID types.UID, contain
 
 // PortForward connects to the pod's port and copies data between the port
 // and the stream.
-func (kl *Kubelet) PortForward(podFullName string, podUID types.UID, port int32, stream io.ReadWriteCloser) error {
+func (kl *Kubelet) PortForward(podFullName string, podUID types.UID, port int32, remoteForwarding bool, stream io.ReadWriteCloser, connection httpstream.Connection) error {
 	streamingRuntime, ok := kl.containerRuntime.(kubecontainer.DirectStreamingRuntime)
 	if !ok {
 		return fmt.Errorf("streaming methods not supported by runtime")
@@ -1639,7 +1658,7 @@ func (kl *Kubelet) PortForward(podFullName string, podUID types.UID, port int32,
 	if pod.IsEmpty() {
 		return fmt.Errorf("pod not found (%q)", podFullName)
 	}
-	return streamingRuntime.PortForward(&pod, port, stream)
+	return streamingRuntime.PortForward(&pod, port, remoteForwarding, stream, connection)
 }
 
 // GetExec gets the URL the exec will be served from, or nil if the Kubelet will serve it.

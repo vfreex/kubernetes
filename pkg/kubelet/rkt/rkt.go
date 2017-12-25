@@ -66,6 +66,7 @@ import (
 	utilstrings "k8s.io/kubernetes/pkg/util/strings"
 	"k8s.io/kubernetes/pkg/util/term"
 	utilexec "k8s.io/utils/exec"
+	"k8s.io/apimachinery/pkg/util/httpstream"
 )
 
 const (
@@ -2249,8 +2250,12 @@ func (r *Runtime) ExecInContainer(containerID kubecontainer.ContainerID, cmd []s
 //  - should we support nsenter + socat in a container, running with elevated privs and --pid=host?
 //
 // TODO(yifan): Merge with the same function in dockertools.
-func (r *Runtime) PortForward(pod *kubecontainer.Pod, port int32, stream io.ReadWriteCloser) error {
-	glog.V(4).Infof("Rkt port forwarding in container.")
+func (r *Runtime) PortForward(pod *kubecontainer.Pod, port int32, reverseForwarding bool, stream io.ReadWriteCloser, conn httpstream.Connection) error {
+	if reverseForwarding {
+		glog.V(4).Infof("Rkt port forwarding in container.")
+	} else {
+		glog.V(4).Infof("Rkt reverse port forwarding in container.")
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), r.requestTimeout)
 	defer cancel()

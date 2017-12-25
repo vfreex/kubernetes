@@ -227,7 +227,7 @@ Loop:
 				utilruntime.HandleError(errors.New(msg))
 				p.printError(msg)
 			} else if complete {
-				go h.portForward(p)
+				go h.portForward(p, h.conn)
 			}
 		}
 	}
@@ -235,16 +235,18 @@ Loop:
 
 // portForward invokes the httpStreamHandler's forwarder.PortForward
 // function for the given stream pair.
-func (h *httpStreamHandler) portForward(p *httpStreamPair) {
+func (h *httpStreamHandler) portForward(p *httpStreamPair, connection httpstream.Connection) {
 	defer p.dataStream.Close()
 	defer p.errorStream.Close()
 
 	portString := p.dataStream.Headers().Get(api.PortHeader)
 	port, _ := strconv.ParseInt(portString, 10, 32)
+	remoteForwardingString := p.dataStream.Headers().Get(api.PortForwardRemoteHeader)
+	remoteForwarding := remoteForwardingString == "1"
 
-	glog.V(5).Infof("(conn=%p, request=%s) invoking forwarder.PortForward for port %s", h.conn, p.requestID, portString)
-	err := h.forwarder.PortForward(h.pod, h.uid, int32(port), p.dataStream)
-	glog.V(5).Infof("(conn=%p, request=%s) done invoking forwarder.PortForward for port %s", h.conn, p.requestID, portString)
+	glog.V(5).Infof("(conn=%p, request=%s) invoking forwarder.PortForward for port %s, remoteForwarding %v", h.conn, p.requestID, portString, remoteForwarding)
+	err := h.forwarder.PortForward(h.pod, h.uid, int32(port), remoteForwarding, p.dataStream, connection)
+	glog.V(5).Infof("(conn=%p, request=%s) done invoking forwarder.PortForward for port %s, remoteForwarding %v", h.conn, p.requestID, portString, remoteForwarding)
 
 	if err != nil {
 		msg := fmt.Errorf("error forwarding port %d to pod %s, uid %v: %v", port, h.pod, h.uid, err)

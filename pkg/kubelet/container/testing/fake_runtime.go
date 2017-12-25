@@ -30,6 +30,7 @@ import (
 	"k8s.io/client-go/util/flowcontrol"
 	. "k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/volume"
+	"k8s.io/apimachinery/pkg/util/httpstream"
 )
 
 type FakePod struct {
@@ -394,7 +395,7 @@ func (f *FakeRuntime) RemoveImage(image ImageSpec) error {
 	return f.Err
 }
 
-func (f *FakeDirectStreamingRuntime) PortForward(pod *Pod, port int32, stream io.ReadWriteCloser) error {
+func (f *FakeDirectStreamingRuntime) PortForward(pod *Pod, port int32, remote bool, stream io.ReadWriteCloser, conn httpstream.Connection) error {
 	f.Lock()
 	defer f.Unlock()
 
